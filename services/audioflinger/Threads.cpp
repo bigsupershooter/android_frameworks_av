@@ -87,6 +87,10 @@
 #include "postpro_patch.h"
 #endif
 
+#ifdef MTK_HARDWARE
+#include "audioresampler/AudioResamplerMtkWrapper.h"
+#endif
+
 // ----------------------------------------------------------------------------
 
 // Note: the following macro is used for extremely verbose logging message.  In
@@ -774,8 +778,8 @@ sp<AudioFlinger::EffectHandle> AudioFlinger::ThreadBase::createEffect_l(
         int sessionId,
         effect_descriptor_t *desc,
         int *enabled,
-        status_t *status
-        )
+        status_t *status,
+        bool pinned)
 {
     sp<EffectModule> effect;
     sp<EffectHandle> handle;
@@ -859,14 +863,7 @@ sp<AudioFlinger::EffectHandle> AudioFlinger::ThreadBase::createEffect_l(
             }
             effectRegistered = true;
             // create a new effect module if none present in the chain
-            effect = new EffectModule(this, chain, desc, id, sessionId);
-            lStatus = effect->status();
-            if (lStatus != NO_ERROR) {
-                goto Exit;
-            }
-            effect->setOffloaded(mType == OFFLOAD, mId);
-
-            lStatus = chain->addEffect_l(effect);
+            lStatus = chain->createEffect_l(effect, this, desc, id, sessionId, pinned);
             if (lStatus != NO_ERROR) {
                 goto Exit;
             }
@@ -908,6 +905,35 @@ Exit:
         *status = lStatus;
     }
     return handle;
+}
+
+void AudioFlinger::ThreadBase::disconnectEffectHandle(EffectHandle *handle,
+                                                      bool unpinIfLast)
+{
+    bool remove = false;
+    sp<EffectModule> effect;
+    {
+        Mutex::Autolock _l(mLock);
+
+        effect = handle->effect().promote();
+        if (effect == 0) {
+            return;
+        }
+        // restore suspended effects if the disconnected handle was enabled and the last one.
+        remove = (effect->removeHandle(handle) == 0) && (!effect->isPinned() || unpinIfLast);
+        if (remove) {
+            removeEffect_l(effect, true);
+        }
+    }
+    if (remove) {
+// not existing
+//mAudioFlinger->updateOrphanEffectChains(effect);
+// notexisting
+        AudioSystem::unregisterEffect(effect->id());
+        if (handle->enabled()) {
+            checkSuspendOnEffectEnabled(effect, false, effect->sessionId());
+        }
+    }
 }
 
 sp<AudioFlinger::EffectModule> AudioFlinger::ThreadBase::getEffect(int sessionId, int effectId)
@@ -968,9 +994,9 @@ status_t AudioFlinger::ThreadBase::addEffect_l(const sp<EffectModule>& effect)
     return NO_ERROR;
 }
 
-void AudioFlinger::ThreadBase::removeEffect_l(const sp<EffectModule>& effect) {
+void AudioFlinger::ThreadBase::removeEffect_l(const sp<EffectModule>& effect, bool release) {
 
-    ALOGV("removeEffect_l() %p effect %p", this, effect.get());
+    ALOGV("%s %p effect %p", __FUNCTION__, this, effect.get());
     effect_descriptor_t desc = effect->desc();
     if ((desc.flags & EFFECT_FLAG_TYPE_MASK) == EFFECT_FLAG_TYPE_AUXILIARY) {
         detachAuxEffect_l(effect->id());
@@ -979,7 +1005,7 @@ void AudioFlinger::ThreadBase::removeEffect_l(const sp<EffectModule>& effect) {
     sp<EffectChain> chain = effect->chain().promote();
     if (chain != 0) {
         // remove effect chain if removing last effect
-        if (chain->removeEffect_l(effect) == 0) {
+        if (chain->removeEffect_l(effect, release) == 0) {
             removeEffectChain_l(chain);
         }
     } else {
@@ -4716,10 +4742,13 @@ void AudioFlinger::DuplicatingThread::removeOutputTrack(MixerThread *thread)
             mOutputTracks[i]->destroy();
             mOutputTracks.removeAt(i);
             updateWaitTime_l();
+            if (thread->getOutput() == mOutput) {
+                mOutput = NULL;
+            }
             return;
         }
     }
-    ALOGV("removeOutputTrack(): unkonwn thread: %p", thread);
+    ALOGV("removeOutputTrack(): unknown thread: %p", thread);
 }
 
 // caller must hold mLock
@@ -4944,8 +4973,13 @@ bool AudioFlinger::RecordThread::threadLoop()
                                     upmix_to_stereo_i16_from_mono_i16((int16_t *)dst,
                                             (int16_t *)src, framesIn);
                                 } else {
+#if MTK_HARDWARE
+                                    MTK_downmix_to_mono_i16_from_stereo_i16((int16_t *)dst,
+                                            (int16_t *)src, framesIn);
+#else
                                     downmix_to_mono_i16_from_stereo_i16((int16_t *)dst,
                                             (int16_t *)src, framesIn);
+#endif
                                 }
                             }
                         }
@@ -5028,8 +5062,13 @@ bool AudioFlinger::RecordThread::threadLoop()
                         ditherAndClamp(mRsmpOutBuffer, mRsmpOutBuffer, framesOut);
                         // the resampler always outputs stereo samples:
                         // do post stereo to mono conversion
+#ifdef MTK_HARDWARE
+                        MTK_downmix_to_mono_i16_from_stereo_i16(buffer.i16, (int16_t *)mRsmpOutBuffer,
+                                framesOut);
+#else
                         downmix_to_mono_i16_from_stereo_i16(buffer.i16, (int16_t *)mRsmpOutBuffer,
                                 framesOut);
+#endif
                     } else {
                         ditherAndClamp((int32_t *)buffer.raw, mRsmpOutBuffer, framesOut);
                     }
@@ -5697,6 +5736,7 @@ void AudioFlinger::RecordThread::readInputParameters()
     mBufferSize = mInput->stream->common.get_buffer_size(&mInput->stream->common);
     mFrameCount = mBufferSize / mFrameSize;
     mRsmpInBuffer = new int16_t[mFrameCount * mChannelCount];
+    memset(mRsmpInBuffer, 0, mFrameCount * mChannelCount * sizeof(mRsmpInBuffer[0]));
 
     if (mSampleRate != mReqSampleRate && mChannelCount <= FCC_2 && mReqChannelCount <= FCC_2)
     {
@@ -5708,7 +5748,11 @@ void AudioFlinger::RecordThread::readInputParameters()
         } else {
             channelCount = 2;
         }
+#ifdef MTK_HARDWARE
+        mResampler = AudioResampler::create(16, channelCount, mReqSampleRate, AudioResampler::MTK_QUALITY);
+#else
         mResampler = AudioResampler::create(16, channelCount, mReqSampleRate);
+#endif
         mResampler->setSampleRate(mSampleRate);
         mResampler->setVolume(AudioMixer::UNITY_GAIN, AudioMixer::UNITY_GAIN);
         mRsmpOutBuffer = new int32_t[mFrameCount * FCC_2];

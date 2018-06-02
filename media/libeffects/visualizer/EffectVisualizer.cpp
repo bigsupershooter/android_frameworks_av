@@ -24,6 +24,7 @@
 #include <time.h>
 #include <math.h>
 #include <audio_effects/effect_visualizer.h>
+#include <cutils/log.h>
 
 
 extern "C" {
@@ -56,6 +57,8 @@ enum visualizer_state_e {
 #define CAPTURE_BUF_SIZE 65536 // "64k should be enough for everyone"
 
 #define DISCARD_MEASUREMENTS_TIME_MS 2000 // discard measurements older than this number of ms
+
+#define MAX_LATENCY_MS 3000 // 3 seconds of latency for audio pipeline
 
 // maximum number of buffers for which we keep track of the measurements
 #define MEASUREMENT_WINDOW_MAX_SIZE_IN_BUFFERS 25 // note: buffer index is stored in uint8_t
@@ -422,21 +425,21 @@ int Visualizer_command(effect_handle_t self, uint32_t cmdCode, uint32_t cmdSize,
 
     switch (cmdCode) {
     case EFFECT_CMD_INIT:
-        if (pReplyData == NULL || *replySize != sizeof(int)) {
+        if (pReplyData == NULL || replySize == NULL || *replySize != sizeof(int)) {
             return -EINVAL;
         }
         *(int *) pReplyData = Visualizer_init(pContext);
         break;
     case EFFECT_CMD_SET_CONFIG:
         if (pCmdData == NULL || cmdSize != sizeof(effect_config_t)
-                || pReplyData == NULL || *replySize != sizeof(int)) {
+                || pReplyData == NULL || replySize == NULL || *replySize != sizeof(int)) {
             return -EINVAL;
         }
         *(int *) pReplyData = Visualizer_setConfig(pContext,
                 (effect_config_t *) pCmdData);
         break;
     case EFFECT_CMD_GET_CONFIG:
-        if (pReplyData == NULL ||
+        if (pReplyData == NULL || replySize == NULL ||
             *replySize != sizeof(effect_config_t)) {
             return -EINVAL;
         }
@@ -446,7 +449,7 @@ int Visualizer_command(effect_handle_t self, uint32_t cmdCode, uint32_t cmdSize,
         Visualizer_reset(pContext);
         break;
     case EFFECT_CMD_ENABLE:
-        if (pReplyData == NULL || *replySize != sizeof(int)) {
+        if (pReplyData == NULL || replySize == NULL || *replySize != sizeof(int)) {
             return -EINVAL;
         }
         if (pContext->mState != VISUALIZER_STATE_INITIALIZED) {
@@ -457,7 +460,7 @@ int Visualizer_command(effect_handle_t self, uint32_t cmdCode, uint32_t cmdSize,
         *(int *)pReplyData = 0;
         break;
     case EFFECT_CMD_DISABLE:
-        if (pReplyData == NULL || *replySize != sizeof(int)) {
+        if (pReplyData == NULL || replySize == NULL || *replySize != sizeof(int)) {
             return -EINVAL;
         }
         if (pContext->mState != VISUALIZER_STATE_ACTIVE) {
@@ -470,7 +473,7 @@ int Visualizer_command(effect_handle_t self, uint32_t cmdCode, uint32_t cmdSize,
     case EFFECT_CMD_GET_PARAM: {
         if (pCmdData == NULL ||
             cmdSize != (int)(sizeof(effect_param_t) + sizeof(uint32_t)) ||
-            pReplyData == NULL ||
+            pReplyData == NULL || replySize == NULL ||
             *replySize < (int)(sizeof(effect_param_t) + sizeof(uint32_t) + sizeof(uint32_t))) {
             return -EINVAL;
         }
@@ -508,7 +511,7 @@ int Visualizer_command(effect_handle_t self, uint32_t cmdCode, uint32_t cmdSize,
     case EFFECT_CMD_SET_PARAM: {
         if (pCmdData == NULL ||
             cmdSize != (int)(sizeof(effect_param_t) + sizeof(uint32_t) + sizeof(uint32_t)) ||
-            pReplyData == NULL || *replySize != sizeof(int32_t)) {
+            pReplyData == NULL || replySize == NULL || *replySize != sizeof(int32_t)) {
             return -EINVAL;
         }
         *(int32_t *)pReplyData = 0;
@@ -518,18 +521,29 @@ int Visualizer_command(effect_handle_t self, uint32_t cmdCode, uint32_t cmdSize,
             break;
         }
         switch (*(uint32_t *)p->data) {
-        case VISUALIZER_PARAM_CAPTURE_SIZE:
-            pContext->mCaptureSize = *((uint32_t *)p->data + 1);
-            ALOGV("set mCaptureSize = %d", pContext->mCaptureSize);
-            break;
+         case VISUALIZER_PARAM_CAPTURE_SIZE: {
+             const uint32_t captureSize = *((uint32_t *)p->data + 1);
+             if (captureSize > VISUALIZER_CAPTURE_SIZE_MAX) {
+                 android_errorWriteLog(0x534e4554, "31781965");
+                 *(int32_t *)pReplyData = -EINVAL;
+                 ALOGW("set mCaptureSize = %u > %u", captureSize, VISUALIZER_CAPTURE_SIZE_MAX);
+             } else {
+                 pContext->mCaptureSize = captureSize;
+                 ALOGV("set mCaptureSize = %u", captureSize);
+             }
+             } break;
         case VISUALIZER_PARAM_SCALING_MODE:
             pContext->mScalingMode = *((uint32_t *)p->data + 1);
             ALOGV("set mScalingMode = %d", pContext->mScalingMode);
             break;
-        case VISUALIZER_PARAM_LATENCY:
-            pContext->mLatency = *((uint32_t *)p->data + 1);
-            ALOGV("set mLatency = %d", pContext->mLatency);
-            break;
+         case VISUALIZER_PARAM_LATENCY: {
+             uint32_t latency = *((uint32_t *)p->data + 1);
+             if (latency > MAX_LATENCY_MS) {
+                 latency = MAX_LATENCY_MS; // clamp latency b/31781965
+             }
+             pContext->mLatency = latency;
+             ALOGV("set mLatency = %u", latency);
+             } break;
         case VISUALIZER_PARAM_MEASUREMENT_MODE:
             pContext->mMeasurementMode = *((uint32_t *)p->data + 1);
             ALOGV("set mMeasurementMode = %d", pContext->mMeasurementMode);
@@ -544,10 +558,11 @@ int Visualizer_command(effect_handle_t self, uint32_t cmdCode, uint32_t cmdSize,
         break;
 
 
-    case VISUALIZER_CMD_CAPTURE:
-        if (pReplyData == NULL || *replySize != pContext->mCaptureSize) {
-            ALOGV("VISUALIZER_CMD_CAPTURE() error *replySize %d pContext->mCaptureSize %d",
-                    *replySize, pContext->mCaptureSize);
+    case VISUALIZER_CMD_CAPTURE: {
+        uint32_t captureSize = pContext->mCaptureSize;
+        if (pReplyData == NULL || replySize == NULL || *replySize != captureSize) {
+            ALOGV("VISUALIZER_CMD_CAPTURE() error *replySize %" PRIu32 " captureSize %" PRIu32,
+                    *replySize, captureSize);
             return -EINVAL;
         }
         if (pContext->mState == VISUALIZER_STATE_ACTIVE) {
@@ -557,9 +572,15 @@ int Visualizer_command(effect_handle_t self, uint32_t cmdCode, uint32_t cmdSize,
             if (latencyMs < 0) {
                 latencyMs = 0;
             }
-            const uint32_t deltaSmpl = pContext->mConfig.inputCfg.samplingRate * latencyMs / 1000;
-
-            int32_t capturePoint = pContext->mCaptureIdx - pContext->mCaptureSize - deltaSmpl;
+            uint32_t deltaSmpl = captureSize + pContext->mConfig.inputCfg.samplingRate * latencyMs / 1000;
+                 // large sample rate, latency, or capture size, could cause overflow.
+                 // do not offset more than the size of buffer.
+                 if (deltaSmpl > CAPTURE_BUF_SIZE) {
+                     android_errorWriteLog(0x534e4554, "31781965");
+                     deltaSmpl = CAPTURE_BUF_SIZE;
+                 }
+                 int32_t capturePoint = pContext->mCaptureIdx - deltaSmpl;
+                 // a negative capturePoint means we wrap the buffer.
             int32_t captureSize = pContext->mCaptureSize;
             if (capturePoint < 0) {
                 int32_t size = -capturePoint;
@@ -592,10 +613,23 @@ int Visualizer_command(effect_handle_t self, uint32_t cmdCode, uint32_t cmdSize,
         } else {
             memset(pReplyData, 0x80, pContext->mCaptureSize);
         }
-
+        }
         break;
 
     case VISUALIZER_CMD_MEASURE: {
+        if (pReplyData == NULL || replySize == NULL ||
+                *replySize < (sizeof(int32_t) * MEASUREMENT_COUNT)) {
+            if (replySize == NULL) {
+                ALOGV("VISUALIZER_CMD_MEASURE() error replySize NULL");
+            } else {
+                ALOGV("VISUALIZER_CMD_MEASURE() error *replySize %" PRIu32
+                        " < (sizeof(int32_t) * MEASUREMENT_COUNT) %" PRIu32,
+                        *replySize,
+                        uint32_t(sizeof(int32_t)) * MEASUREMENT_COUNT);
+            }
+            android_errorWriteLog(0x534e4554, "30229821");
+            return -EINVAL;
+        }
         uint16_t peakU16 = 0;
         float sumRmsSquared = 0.0f;
         uint8_t nbValidMeasurements = 0;

@@ -160,8 +160,8 @@ void Downmix_testIndexComputation(uint32_t mask) {
 /*--- Effect Library Interface Implementation ---*/
 
 int32_t DownmixLib_Create(const effect_uuid_t *uuid,
-        int32_t sessionId,
-        int32_t ioId,
+        int32_t sessionId __unused,
+        int32_t ioId __unused,
         effect_handle_t *pHandle) {
     int ret;
     int i;
@@ -384,7 +384,7 @@ static int Downmix_Command(effect_handle_t self, uint32_t cmdCode, uint32_t cmdS
 
     switch (cmdCode) {
     case EFFECT_CMD_INIT:
-        if (pReplyData == NULL || *replySize != sizeof(int)) {
+        if (pReplyData == NULL || replySize == NULL || *replySize != sizeof(int)) {
             return -EINVAL;
         }
         *(int *) pReplyData = Downmix_Init(pDwmModule);
@@ -392,7 +392,7 @@ static int Downmix_Command(effect_handle_t self, uint32_t cmdCode, uint32_t cmdS
 
     case EFFECT_CMD_SET_CONFIG:
         if (pCmdData == NULL || cmdSize != sizeof(effect_config_t)
-                || pReplyData == NULL || *replySize != sizeof(int)) {
+                || pReplyData == NULL || replySize == NULL || *replySize != sizeof(int)) {
             return -EINVAL;
         }
         *(int *) pReplyData = Downmix_Configure(pDwmModule,
@@ -407,7 +407,7 @@ static int Downmix_Command(effect_handle_t self, uint32_t cmdCode, uint32_t cmdS
         ALOGV("Downmix_Command EFFECT_CMD_GET_PARAM pCmdData %p, *replySize %d, pReplyData: %p",
                 pCmdData, *replySize, pReplyData);
         if (pCmdData == NULL || cmdSize < (int)(sizeof(effect_param_t) + sizeof(int32_t)) ||
-                pReplyData == NULL ||
+                pReplyData == NULL || replySize == NULL ||
                 *replySize < (int) sizeof(effect_param_t) + 2 * sizeof(int32_t)) {
             return -EINVAL;
         }
@@ -424,10 +424,14 @@ static int Downmix_Command(effect_handle_t self, uint32_t cmdCode, uint32_t cmdS
         ALOGV("Downmix_Command EFFECT_CMD_SET_PARAM cmdSize %d pCmdData %p, *replySize %d, " \
                 "pReplyData %p", cmdSize, pCmdData, *replySize, pReplyData);
         if (pCmdData == NULL || (cmdSize < (int)(sizeof(effect_param_t) + sizeof(int32_t)))
-                || pReplyData == NULL || *replySize != (int)sizeof(int32_t)) {
+                || pReplyData == NULL || replySize == NULL || *replySize != (int)sizeof(int32_t)) {
             return -EINVAL;
         }
         effect_param_t *cmd = (effect_param_t *) pCmdData;
+        if (cmd->psize != sizeof(int32_t)) {
+            android_errorWriteLog(0x534e4554, "63662938");
+            return -EINVAL;
+        }
         *(int *)pReplyData = Downmix_setParameter(pDownmixer, *(int32_t *)cmd->data,
                 cmd->vsize, cmd->data + sizeof(int32_t));
         break;
@@ -443,7 +447,7 @@ static int Downmix_Command(effect_handle_t self, uint32_t cmdCode, uint32_t cmdS
         break;
 
     case EFFECT_CMD_ENABLE:
-        if (pReplyData == NULL || *replySize != sizeof(int)) {
+        if (pReplyData == NULL || replySize == NULL || *replySize != sizeof(int)) {
             return -EINVAL;
         }
         if (pDownmixer->state != DOWNMIX_STATE_INITIALIZED) {
@@ -455,7 +459,7 @@ static int Downmix_Command(effect_handle_t self, uint32_t cmdCode, uint32_t cmdS
         break;
 
     case EFFECT_CMD_DISABLE:
-        if (pReplyData == NULL || *replySize != sizeof(int)) {
+        if (pReplyData == NULL || replySize == NULL || *replySize != sizeof(int)) {
             return -EINVAL;
         }
         if (pDownmixer->state != DOWNMIX_STATE_ACTIVE) {
@@ -670,7 +674,7 @@ int Downmix_Configure(downmix_module_t *pDwmModule, effect_config_t *pConfig, bo
  *----------------------------------------------------------------------------
  */
 
-int Downmix_Reset(downmix_object_t *pDownmixer, bool init) {
+int Downmix_Reset(downmix_object_t *pDownmixer __unused, bool init __unused) {
     // nothing to do here
     return 0;
 }

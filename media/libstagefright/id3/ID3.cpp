@@ -194,6 +194,13 @@ struct id3_header {
 
     if (header.version_major == 4) {
         void *copy = malloc(size);
+        if (copy == NULL) {
+            free(mData);
+            mData = NULL;
+            ALOGE("b/24623447, no more memory");
+            return false;
+        }
+
         memcpy(copy, mData, size);
 
         bool success = removeUnsynchronizationV2_4(false /* iTunesHack */);
@@ -234,7 +241,14 @@ struct id3_header {
             return false;
         }
 
-        size_t extendedHeaderSize = U32_AT(&mData[0]) + 4;
+        size_t extendedHeaderSize = U32_AT(&mData[0]);
+        if (extendedHeaderSize > SIZE_MAX - 4) {
+            free(mData);
+            mData = NULL;
+            ALOGE("b/24623447, extendedHeaderSize is too large");
+            return false;
+        }
+        extendedHeaderSize += 4;
 
         if (extendedHeaderSize > mSize) {
             free(mData);
@@ -252,7 +266,10 @@ struct id3_header {
             if (extendedHeaderSize >= 10) {
                 size_t paddingSize = U32_AT(&mData[6]);
 
-                if (mFirstFrameOffset + paddingSize > mSize) {
+                if (paddingSize > SIZE_MAX - mFirstFrameOffset) {
+                    ALOGE("b/24623447, paddingSize is too large");
+                }
+                if (paddingSize > mSize - mFirstFrameOffset) {
                     free(mData);
                     mData = NULL;
 
@@ -327,7 +344,7 @@ bool ID3::removeUnsynchronizationV2_4(bool iTunesHack) {
     size_t oldSize = mSize;
 
     size_t offset = 0;
-    while (offset + 10 <= mSize) {
+    while (mSize >= 10 && offset <= mSize - 10) {
         if (!memcmp(&mData[offset], "\0\0\0\0", 4)) {
             break;
         }
@@ -339,7 +356,7 @@ bool ID3::removeUnsynchronizationV2_4(bool iTunesHack) {
             return false;
         }
 
-        if (offset + dataSize + 10 > mSize) {
+        if (dataSize > mSize - 10 - offset) {
             return false;
         }
 
@@ -349,6 +366,9 @@ bool ID3::removeUnsynchronizationV2_4(bool iTunesHack) {
         if (flags & 1) {
             // Strip data length indicator
 
+            if (mSize < 14 || mSize - 14 < offset || dataSize < 4) {
+                return false;
+            }
             memmove(&mData[offset + 10], &mData[offset + 14], mSize - offset - 14);
             mSize -= 4;
             dataSize -= 4;
@@ -356,7 +376,7 @@ bool ID3::removeUnsynchronizationV2_4(bool iTunesHack) {
             flags &= ~1;
         }
 
-        if (flags & 2) {
+        if ((flags & 2) && (dataSize >= 2)) {
             // This file has "unsynchronization", so we have to replace occurrences
             // of 0xff 0x00 with just 0xff in order to get the real data.
 
@@ -369,14 +389,23 @@ bool ID3::removeUnsynchronizationV2_4(bool iTunesHack) {
                     --mSize;
                     --dataSize;
                 }
-                mData[writeOffset++] = mData[readOffset++];
+                if (i + 1 < dataSize) {
+                    // Only move data if there's actually something to move.
+                    // This handles the special case of the data being only [0xff, 0x00]
+                    // which should be converted to just 0xff if unsynchronization is on.
+                    mData[writeOffset++] = mData[readOffset++];
+                }
             }
             // move the remaining data following this frame
-            memmove(&mData[writeOffset], &mData[readOffset], oldSize - readOffset);
+            if (readOffset <= oldSize) {
+                memmove(&mData[writeOffset], &mData[readOffset], oldSize - readOffset);
+            } else {
+                ALOGE("b/34618607 (%zu %zu %zu %zu)", readOffset, writeOffset, oldSize, mSize);
+                android_errorWriteLog(0x534e4554, "34618607");
+            }
 
-            flags &= ~2;
         }
-
+        flags &= ~2;
         if (flags != prevFlags || iTunesHack) {
             WriteSyncsafeInteger(&mData[offset + 4], dataSize);
             mData[offset + 8] = flags >> 8;
@@ -547,6 +576,9 @@ void ID3::Iterator::getstring(String8 *id, bool otherdata) const {
         return;
     }
 
+    if (mFrameSize < getHeaderLength() + 1) {
+        return;
+    }
     size_t n = mFrameSize - getHeaderLength() - 1;
     if (otherdata) {
         // skip past the encoding, language, and the 0 separator
@@ -653,6 +685,11 @@ void ID3::Iterator::findFrame() {
 
             mFrameSize += 6;
 
+            // Prevent integer overflow in validation
+            if (SIZE_MAX - mOffset <= mFrameSize) {
+                return;
+            }
+
             if (mOffset + mFrameSize > mParent.mSize) {
                 ALOGV("partial frame at offset %d (size = %d, bytes-remaining = %d)",
                      mOffset, mFrameSize, mParent.mSize - mOffset - 6);
@@ -682,7 +719,7 @@ void ID3::Iterator::findFrame() {
                 return;
             }
 
-            size_t baseSize;
+            size_t baseSize = 0;
             if (mParent.mVersion == ID3_V2_4) {
                 if (!ParseSyncsafeInteger(
                             &mParent.mData[mOffset + 4], &baseSize)) {
@@ -692,7 +729,21 @@ void ID3::Iterator::findFrame() {
                 baseSize = U32_AT(&mParent.mData[mOffset + 4]);
             }
 
-            mFrameSize = 10 + baseSize;
+            if (baseSize == 0) {
+                return;
+            }
+
+            // Prevent integer overflow when adding
+            if (SIZE_MAX - 10 <= baseSize) {
+                return;
+            }
+
+            mFrameSize = 10 + baseSize; // add tag id, size field and flags
+
+            // Prevent integer overflow in validation
+            if (SIZE_MAX - mOffset <= mFrameSize) {
+                return;
+            }
 
             if (mOffset + mFrameSize > mParent.mSize) {
                 ALOGV("partial frame at offset %d (size = %d, bytes-remaining = %d)",
@@ -780,20 +831,21 @@ void ID3::Iterator::findFrame() {
     }
 }
 
-static size_t StringSize(const uint8_t *start, uint8_t encoding) {
+// return includes terminator;  if unterminated, returns > limit
+static size_t StringSize(const uint8_t *start, size_t limit, uint8_t encoding) {
+
     if (encoding == 0x00 || encoding == 0x03) {
         // ISO 8859-1 or UTF-8
-        return strlen((const char *)start) + 1;
+        return strnlen((const char *)start, limit) + 1;
     }
 
     // UCS-2
     size_t n = 0;
-    while (start[n] != '\0' || start[n + 1] != '\0') {
+    while ((n+1 < limit) && (start[n] != '\0' || start[n + 1] != '\0')) {
         n += 2;
     }
-
-    // Add size of null termination.
-    return n + 2;
+    n += 2;
+    return n;
 }
 
 const void *
@@ -811,10 +863,18 @@ ID3::getAlbumArt(size_t *length, String8 *mime) const {
 
         if (mVersion == ID3_V2_3 || mVersion == ID3_V2_4) {
             uint8_t encoding = data[0];
-            mime->setTo((const char *)&data[1]);
-            size_t mimeLen = strlen((const char *)&data[1]) + 1;
+            size_t consumed = 1;
 
-            uint8_t picType = data[1 + mimeLen];
+             // *always* in an 8-bit encoding
+             size_t mimeLen = StringSize(&data[consumed], size - consumed, 0x00);
+             if (mimeLen > size - consumed) {
+                 ALOGW("bogus album art size: mime");
+                 return NULL;
+             }
+             mime->setTo((const char *)&data[consumed]);
+             consumed += mimeLen;
+
+            uint8_t picType = data[consumed];
 #if 0
             if (picType != 0x03) {
                 // Front Cover Art
@@ -823,13 +883,29 @@ ID3::getAlbumArt(size_t *length, String8 *mime) const {
             }
 #endif
 
-            size_t descLen = StringSize(&data[2 + mimeLen], encoding);
+            consumed++;
+            if (consumed >= size) {
+                ALOGW("bogus album art size: pic type");
+                return NULL;
+            }
 
-            *length = size - 2 - mimeLen - descLen;
+            size_t descLen = StringSize(&data[consumed], size - consumed, encoding);
+            consumed += descLen;
 
-            return &data[2 + mimeLen + descLen];
+            if (consumed >= size) {
+                ALOGW("bogus album art size: description");
+                return NULL;
+            }
+
+            *length = size - consumed;
+
+            return &data[consumed];
         } else {
             uint8_t encoding = data[0];
+
+            if (size <= 5) {
+                return NULL;
+            }
 
             if (!memcmp(&data[1], "PNG", 3)) {
                 mime->setTo("image/png");
@@ -850,7 +926,10 @@ ID3::getAlbumArt(size_t *length, String8 *mime) const {
             }
 #endif
 
-            size_t descLen = StringSize(&data[5], encoding);
+            size_t descLen = StringSize(&data[5], size - 5, encoding);
+            if (descLen > size - 5) {
+                return NULL;
+            }
 
             *length = size - 5 - descLen;
 

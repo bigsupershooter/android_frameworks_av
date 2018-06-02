@@ -27,8 +27,23 @@ LOCAL_SHARED_LIBRARIES :=               \
         libstagefright_foundation       \
         libdl
 
+ifeq ($(BOARD_HAS_MTK_HARDWARE),true)
+    LOCAL_C_INCLUDES += \
+        $(TOP)/hardware/mediatek/media/include
+
+    LOCAL_SHARED_LIBRARIES += \
+        libstagefright_memutil
+
+    LOCAL_STATIC_LIBRARIES += \
+        libstagefright_bufferallocator
+endif
+
 ifeq ($(BOARD_USES_PROPRIETARY_OMX),SAMSUNG)
 LOCAL_CFLAGS     += -DSAMSUNG_OMX
+endif
+
+ifeq ($(BOARD_SKIP_CVE_2017_13154),true)
+LOCAL_CFLAGS     += -DSKIP_CVE_2017_13154
 endif
 
 LOCAL_MODULE:= libstagefright_omx

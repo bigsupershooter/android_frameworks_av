@@ -107,6 +107,11 @@ class AudioFlinger :
 public:
     static const char* getServiceName() ANDROID_API { return "media.audio_flinger"; }
 
+#ifdef MTK_HARDWARE
+    virtual status_t SetAudioData(int par1,size_t len, void *ptr);
+    virtual status_t GetAudioData(int par1,size_t len, void *ptr);
+#endif
+
     virtual     status_t    dump(int fd, const Vector<String16>& args);
 
     // IAudioFlinger interface, in binder opcode order
@@ -625,9 +630,9 @@ private:
 #endif
                 void        removeClient_l(pid_t pid);
                 void        removeNotificationClient(pid_t pid);
-
                 bool isNonOffloadableGlobalEffectEnabled_l();
                 void onNonOffloadableGlobalEffectEnable();
+                bool isSessionAcquired_l(int audioSession);
 
     class AudioHwDevice {
     public:

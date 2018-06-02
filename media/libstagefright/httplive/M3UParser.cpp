@@ -560,10 +560,13 @@ status_t M3UParser::parse(const void *_data, size_t size) {
         }
 
         if (!line.startsWith("#")) {
+            if (itemMeta == NULL) {
+                ALOGV("itemMeta == NULL");
+                return ERROR_MALFORMED;
+            }
             if (!mIsVariantPlaylist) {
                 int64_t durationUs;
-                if (itemMeta == NULL
-                        || !itemMeta->findInt64("durationUs", &durationUs)) {
+                if (!itemMeta->findInt64("durationUs", &durationUs)) {
                     return ERROR_MALFORMED;
                 }
             }
@@ -748,6 +751,9 @@ status_t M3UParser::parseStreamInf(
         }
     }
 
+    if (meta->get() == NULL) {
+        return ERROR_MALFORMED;
+    }
     return OK;
 }
 

@@ -127,6 +127,29 @@ size_t AudioFlinger::mTeeSinkTrackFrames = kTeeSinkTrackFramesDefault;
 static const nsecs_t kMinGlobalEffectEnabletimeNs = seconds(7200);
 
 // ----------------------------------------------------------------------------
+#ifdef MTK_HARDWARE
+status_t AudioFlinger::SetAudioData(int par1,size_t len,void *ptr)
+{
+    ALOGV("SetAudioData par1 = %d,len = %d ",par1,len);
+    AutoMutex lock(mHardwareLock);
+    audio_hw_device_t *dev = mPrimaryHardwareDev->hwDevice();
+    mHardwareStatus = AUDIO_HW_SET_PARAMETER;
+    dev->SetAudioData(dev,par1,len,ptr);
+    mHardwareStatus = AUDIO_HW_IDLE;
+    return NO_ERROR;
+}
+
+status_t AudioFlinger::GetAudioData(int par1,size_t len,void *ptr)
+{
+    ALOGV("GetAudioData par1 = %d,len = %d ",par1,len);
+    AutoMutex lock(mHardwareLock);
+    audio_hw_device_t *dev = mPrimaryHardwareDev->hwDevice();
+    mHardwareStatus = AUDIO_HW_SET_PARAMETER;
+    dev->GetAudioData(dev,par1,len,ptr);
+    mHardwareStatus = AUDIO_HW_IDLE;
+    return NO_ERROR;
+}
+#endif
 
 static int load_audio_interface(const char *if_name, audio_hw_device_t **dev)
 {
@@ -837,8 +860,12 @@ status_t AudioFlinger::setMasterVolume(float value)
     // assigned to HALs which do not have master volume support will apply
     // master volume during the mix operation.  Threads with HALs which do
     // support master volume will simply ignore the setting.
-    for (size_t i = 0; i < mPlaybackThreads.size(); i++)
+    for (size_t i = 0; i < mPlaybackThreads.size(); i++) {
+        if (mPlaybackThreads.valueAt(i)->isDuplicating()) {
+            continue;
+        }
         mPlaybackThreads.valueAt(i)->setMasterVolume(value);
+    }
 
     return NO_ERROR;
 }
@@ -945,8 +972,12 @@ status_t AudioFlinger::setMasterMute(bool muted)
     // assigned to HALs which do not have master mute support will apply master
     // mute during the mix operation.  Threads with HALs which do support master
     // mute will simply ignore the setting.
-    for (size_t i = 0; i < mPlaybackThreads.size(); i++)
+    for (size_t i = 0; i < mPlaybackThreads.size(); i++) {
+        if (mPlaybackThreads.valueAt(i)->isDuplicating()) {
+            continue;
+        }
         mPlaybackThreads.valueAt(i)->setMasterMute(muted);
+    }
 #endif
 
     return NO_ERROR;
@@ -1028,6 +1059,15 @@ status_t AudioFlinger::setStreamVolume(audio_stream_type_t stream, float value,
     } else {
         thread->setStreamVolume(stream, value);
     }
+
+#ifdef MTK_HARDWARE
+    // FM Volume is controlled by hardware, we want to keep it in sync with
+    // the music stream.
+    if (stream == AUDIO_STREAM_MUSIC) {
+        audio_hw_device_t *dev = mPrimaryHardwareDev->hwDevice();
+        dev->set_parameters(dev, String8::format("SetFmVolume=%f", value));
+    }
+#endif
 
     return NO_ERROR;
 }
@@ -1401,7 +1441,7 @@ void AudioFlinger::removeNotificationClient(pid_t pid)
     ALOGV("%d died, releasing its sessions", pid);
     size_t num = mAudioSessionRefs.size();
     bool removed = false;
-    for (size_t i = 0; i< num; ) {
+    for (size_t i = 0; i < num; ) {
         AudioSessionRef *ref = mAudioSessionRefs.itemAt(i);
         ALOGV(" pid %d @ %d", ref->mPid, i);
         if (ref->mPid == pid) {
@@ -2049,7 +2089,7 @@ status_t AudioFlinger::closeOutput_nonvirtual(audio_io_handle_t output)
 
         if (thread->type() == ThreadBase::MIXER) {
             for (size_t i = 0; i < mPlaybackThreads.size(); i++) {
-                if (mPlaybackThreads.valueAt(i)->type() == ThreadBase::DUPLICATING) {
+                if (mPlaybackThreads.valueAt(i)->isDuplicating()) {
                     DuplicatingThread *dupThread =
                             (DuplicatingThread *)mPlaybackThreads.valueAt(i).get();
                     dupThread->removeOutputTrack((MixerThread *)thread.get());
@@ -2080,7 +2120,7 @@ status_t AudioFlinger::closeOutput_nonvirtual(audio_io_handle_t output)
     // The thread entity (active unit of execution) is no longer running here,
     // but the ThreadBase container still exists.
 
-    if (thread->type() != ThreadBase::DUPLICATING) {
+    if (!thread->isDuplicating()) {
         AudioStreamOut *out = thread->clearOutput();
         ALOG_ASSERT(out != NULL, "out shouldn't be NULL");
         // from now on thread->mOutput is NULL
@@ -2176,7 +2216,9 @@ audio_io_handle_t AudioFlinger::openInput(audio_module_handle_t module,
     // resample the input and do mono to stereo or stereo to mono conversions on 16 bit PCM inputs.
     if (status == BAD_VALUE &&
         reqFormat == config.format && config.format == AUDIO_FORMAT_PCM_16_BIT &&
+#ifndef MTK_HARDWARE
         (config.sample_rate <= 2 * reqSamplingRate) &&
+#endif
         (getInputChannelCount(config.channel_mask) <= FCC_2) && (getInputChannelCount(reqChannels) <= FCC_2)) {
         ALOGV("openInput() reopening with proposed sampling rate and channel mask");
         inStream = NULL;
@@ -2351,7 +2393,7 @@ void AudioFlinger::acquireAudioSessionId(int audioSession)
     }
 
     size_t num = mAudioSessionRefs.size();
-    for (size_t i = 0; i< num; i++) {
+    for (size_t i = 0; i < num; i++) {
         AudioSessionRef *ref = mAudioSessionRefs.editItemAt(i);
         if (ref->mSessionid == audioSession && ref->mPid == caller) {
             ref->mCnt++;
@@ -2369,7 +2411,7 @@ void AudioFlinger::releaseAudioSessionId(int audioSession)
     pid_t caller = IPCThreadState::self()->getCallingPid();
     ALOGV("releasing %d from %d", audioSession, caller);
     size_t num = mAudioSessionRefs.size();
-    for (size_t i = 0; i< num; i++) {
+    for (size_t i = 0; i < num; i++) {
         AudioSessionRef *ref = mAudioSessionRefs.itemAt(i);
         if (ref->mSessionid == audioSession && ref->mPid == caller) {
             ref->mCnt--;
@@ -2385,6 +2427,18 @@ void AudioFlinger::releaseAudioSessionId(int audioSession)
     // If the caller is mediaserver it is likely that the session being released was acquired
     // on behalf of a process not in notification clients and we ignore the warning.
     ALOGW_IF(caller != getpid_cached, "session id %d not found for pid %d", audioSession, caller);
+}
+
+bool AudioFlinger::isSessionAcquired_l(int audioSession)
+{
+    size_t num = mAudioSessionRefs.size();
+    for (size_t i = 0; i < num; i++) {
+        AudioSessionRef *ref = mAudioSessionRefs.itemAt(i);
+        if (ref->mSessionid == audioSession) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void AudioFlinger::purgeStaleEffects_l() {
@@ -2473,6 +2527,9 @@ AudioFlinger::PlaybackThread *AudioFlinger::primaryPlaybackThread_l() const
 {
     for (size_t i = 0; i < mPlaybackThreads.size(); i++) {
         PlaybackThread *thread = mPlaybackThreads.valueAt(i).get();
+        if(thread->isDuplicating()) {
+            continue;
+        }
         AudioStreamOut *output = thread->getOutput();
         if (output != NULL && output->audioHwDev == mPrimaryHardwareDev) {
             return thread;
@@ -2716,8 +2773,9 @@ sp<IEffect> AudioFlinger::createEffect(
         sp<Client> client = registerPid_l(pid);
 
         // create effect on selected output thread
+        bool pinned = (sessionId > AUDIO_SESSION_OUTPUT_MIX) && isSessionAcquired_l(sessionId);
         handle = thread->createEffect_l(client, effectClient, priority, sessionId,
-                &desc, enabled, &lStatus);
+                &desc, enabled, &lStatus, pinned);
         if (handle != 0 && id != NULL) {
             *id = handle->id();
         }

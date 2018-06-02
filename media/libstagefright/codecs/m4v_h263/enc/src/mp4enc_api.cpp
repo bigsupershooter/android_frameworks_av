@@ -21,6 +21,13 @@
 #include "rate_control.h"
 #include "m4venc_oscl.h"
 
+#ifndef INT32_MAX
+#define INT32_MAX 0x7fffffff
+#endif
+
+#ifndef SIZE_MAX
+#define SIZE_MAX ((size_t) -1)
+#endif
 
 /* Inverse normal zigzag */
 const static Int zigzag_i[NCOEFF_BLOCK] =
@@ -610,6 +617,10 @@ OSCL_EXPORT_REF Bool    PVInitVideoEncoder(VideoEncControls *encoderControl, Vid
             max = temp_w * temp_h;
             max_width = ((temp_w + 15) >> 4) << 4;
             max_height = ((temp_h + 15) >> 4) << 4;
+            if (((uint64_t)max_width * max_height) > (uint64_t)INT32_MAX
+                    || temp_w > INT32_MAX - 15 || temp_h > INT32_MAX - 15) {
+                goto CLEAN_UP;
+            }
             nTotalMB = ((max_width * max_height) >> 8);
         }
 
@@ -654,6 +665,9 @@ OSCL_EXPORT_REF Bool    PVInitVideoEncoder(VideoEncControls *encoderControl, Vid
 
     /* Allocating motion vector space and interpolation memory*/
 
+    if ((size_t)nTotalMB > SIZE_MAX / sizeof(MOT *)) {
+        goto CLEAN_UP;
+    }
     video->mot = (MOT **)M4VENC_MALLOC(sizeof(MOT *) * nTotalMB);
     if (video->mot == NULL) goto CLEAN_UP;
 
@@ -676,11 +690,17 @@ OSCL_EXPORT_REF Bool    PVInitVideoEncoder(VideoEncControls *encoderControl, Vid
     /*    so that compilers can generate faster code to indexing the     */
     /*    data inside (by using << instead of *).         04/14/2000. */
     /* 5/29/01, use  decoder lib ACDC prediction memory scheme.  */
+    if ((size_t)nTotalMB > SIZE_MAX / sizeof(typeDCStore)) {
+        goto CLEAN_UP;
+    }
     video->predDC = (typeDCStore *) M4VENC_MALLOC(nTotalMB * sizeof(typeDCStore));
     if (video->predDC == NULL) goto CLEAN_UP;
 
     if (!video->encParams->H263_Enabled)
     {
+        if ((size_t)((max_width >> 4) + 1) > SIZE_MAX / sizeof(typeDCACStore)) {
+            goto CLEAN_UP;
+        }
         video->predDCAC_col = (typeDCACStore *) M4VENC_MALLOC(((max_width >> 4) + 1) * sizeof(typeDCACStore));
         if (video->predDCAC_col == NULL) goto CLEAN_UP;
 
@@ -688,6 +708,9 @@ OSCL_EXPORT_REF Bool    PVInitVideoEncoder(VideoEncControls *encoderControl, Vid
         /*  the rest will be used for storing horizontal (row) AC coefficients  */
         video->predDCAC_row = video->predDCAC_col + 1;        /*  ACDC */
 
+        if ((size_t)nTotalMB > SIZE_MAX / sizeof(Int)) {
+            goto CLEAN_UP;
+        }
         video->acPredFlag = (Int *) M4VENC_MALLOC(nTotalMB * sizeof(Int)); /* Memory for acPredFlag */
         if (video->acPredFlag == NULL) goto CLEAN_UP;
     }
@@ -741,9 +764,16 @@ OSCL_EXPORT_REF Bool    PVInitVideoEncoder(VideoEncControls *encoderControl, Vid
         offset = (pitch << 4) + 16;
         max_height += 32;
     }
+    if (((uint64_t)pitch * max_height) > (uint64_t)INT32_MAX) {
+        goto CLEAN_UP;
+    }
     size = pitch * max_height;
 
-    video->currVop->yChan = (PIXEL *)M4VENC_MALLOC(sizeof(PIXEL) * (size + (size >> 1))); /* Memory for currVop Y */
+    if (size > INT32_MAX - (size >> 1)
+            || (size_t)(size + (size >> 1)) > SIZE_MAX / sizeof(PIXEL)) {
+        goto CLEAN_UP;
+    }
+    video->currVop->allChan = video->currVop->yChan = (PIXEL *)M4VENC_MALLOC(sizeof(PIXEL) * (size + (size >> 1))); /* Memory for currVop Y */
     if (video->currVop->yChan == NULL) goto CLEAN_UP;
     video->currVop->uChan = video->currVop->yChan + size;/* Memory for currVop U */
     video->currVop->vChan = video->currVop->uChan + (size >> 2);/* Memory for currVop V */
@@ -761,7 +791,7 @@ OSCL_EXPORT_REF Bool    PVInitVideoEncoder(VideoEncControls *encoderControl, Vid
 
     video->prevBaseVop = (Vop *) M4VENC_MALLOC(sizeof(Vop));         /* Memory for Previous Base Vop */
     if (video->prevBaseVop == NULL) goto CLEAN_UP;
-    video->prevBaseVop->yChan = (PIXEL *) M4VENC_MALLOC(sizeof(PIXEL) * (size + (size >> 1))); /* Memory for prevBaseVop Y */
+    video->prevBaseVop->allChan = video->prevBaseVop->yChan = (PIXEL *) M4VENC_MALLOC(sizeof(PIXEL) * (size + (size >> 1))); /* Memory for prevBaseVop Y */
     if (video->prevBaseVop->yChan == NULL) goto CLEAN_UP;
     video->prevBaseVop->uChan = video->prevBaseVop->yChan + size; /* Memory for prevBaseVop U */
     video->prevBaseVop->vChan = video->prevBaseVop->uChan + (size >> 2); /* Memory for prevBaseVop V */
@@ -778,7 +808,7 @@ OSCL_EXPORT_REF Bool    PVInitVideoEncoder(VideoEncControls *encoderControl, Vid
     {
         video->nextBaseVop = (Vop *) M4VENC_MALLOC(sizeof(Vop));         /* Memory for Next Base Vop */
         if (video->nextBaseVop == NULL) goto CLEAN_UP;
-        video->nextBaseVop->yChan = (PIXEL *) M4VENC_MALLOC(sizeof(PIXEL) * (size + (size >> 1))); /* Memory for nextBaseVop Y */
+        video->nextBaseVop->allChan = video->nextBaseVop->yChan = (PIXEL *) M4VENC_MALLOC(sizeof(PIXEL) * (size + (size >> 1))); /* Memory for nextBaseVop Y */
         if (video->nextBaseVop->yChan == NULL) goto CLEAN_UP;
         video->nextBaseVop->uChan = video->nextBaseVop->yChan + size; /* Memory for nextBaseVop U */
         video->nextBaseVop->vChan = video->nextBaseVop->uChan + (size >> 2); /* Memory for nextBaseVop V */
@@ -795,7 +825,7 @@ OSCL_EXPORT_REF Bool    PVInitVideoEncoder(VideoEncControls *encoderControl, Vid
     {
         video->prevEnhanceVop = (Vop *) M4VENC_MALLOC(sizeof(Vop));      /* Memory for Previous Enhancement Vop */
         if (video->prevEnhanceVop == NULL) goto CLEAN_UP;
-        video->prevEnhanceVop->yChan = (PIXEL *) M4VENC_MALLOC(sizeof(PIXEL) * (size + (size >> 1))); /* Memory for Previous Ehancement Y */
+        video->prevEnhanceVop->allChan = video->prevEnhanceVop->yChan = (PIXEL *) M4VENC_MALLOC(sizeof(PIXEL) * (size + (size >> 1))); /* Memory for Previous Ehancement Y */
         if (video->prevEnhanceVop->yChan == NULL) goto CLEAN_UP;
         video->prevEnhanceVop->uChan = video->prevEnhanceVop->yChan + size; /* Memory for Previous Enhancement U */
         video->prevEnhanceVop->vChan = video->prevEnhanceVop->uChan + (size >> 2); /* Memory for Previous Enhancement V */
@@ -841,6 +871,9 @@ OSCL_EXPORT_REF Bool    PVInitVideoEncoder(VideoEncControls *encoderControl, Vid
     /* /// End /////////////////////////////////////// */
 
 
+    if ((size_t)nLayers > SIZE_MAX / sizeof(Vol *)) {
+        goto CLEAN_UP;
+    }
     video->vol = (Vol **)M4VENC_MALLOC(nLayers * sizeof(Vol *)); /* Memory for VOL pointers */
 
     /* Memory allocation and Initialization of Vols and writing of headers */
@@ -1163,39 +1196,35 @@ OSCL_EXPORT_REF Bool    PVCleanUpVideoEncoder(VideoEncControls *encoderControl)
 
         if (video->currVop)
         {
-            if (video->currVop->yChan)
+            if (video->currVop->allChan)
             {
-                video->currVop->yChan -= offset;
-                M4VENC_FREE(video->currVop->yChan);
+                M4VENC_FREE(video->currVop->allChan);
             }
             M4VENC_FREE(video->currVop);
         }
 
         if (video->nextBaseVop)
         {
-            if (video->nextBaseVop->yChan)
+            if (video->nextBaseVop->allChan)
             {
-                video->nextBaseVop->yChan -= offset;
-                M4VENC_FREE(video->nextBaseVop->yChan);
+                M4VENC_FREE(video->nextBaseVop->allChan);
             }
             M4VENC_FREE(video->nextBaseVop);
         }
 
         if (video->prevBaseVop)
         {
-            if (video->prevBaseVop->yChan)
+            if (video->prevBaseVop->allChan)
             {
-                video->prevBaseVop->yChan -= offset;
-                M4VENC_FREE(video->prevBaseVop->yChan);
+                M4VENC_FREE(video->prevBaseVop->allChan);
             }
             M4VENC_FREE(video->prevBaseVop);
         }
         if (video->prevEnhanceVop)
         {
-            if (video->prevEnhanceVop->yChan)
+            if (video->prevEnhanceVop->allChan)
             {
-                video->prevEnhanceVop->yChan -= offset;
-                M4VENC_FREE(video->prevEnhanceVop->yChan);
+                M4VENC_FREE(video->prevEnhanceVop->allChan);
             }
             M4VENC_FREE(video->prevEnhanceVop);
         }
